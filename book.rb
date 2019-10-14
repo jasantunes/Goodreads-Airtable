@@ -1,168 +1,234 @@
-require 'byebug'
+require 'set'
 require_relative 'author'
 require_relative 'serie'
-require_relative 'category'
+require_relative 'genre'
 require_relative 'goodreads_client'
 
 class Book < Airrecord::Table
-  self.base_key = 'apppDHg8PasCSBhei'
+  self.base_key = ENV['AIRTABLE_BASE_ID']
   self.table_name = 'Books'
 
-  GOODREADS_BLACKLIST = %w(
-    to-read favorites currently-reading owned
-    series favourites re-read owned-books
-    books-i-own wish-list si audiobook
-    book-club ebook kindle to-buy
-  )
+  GOODREADS_BLACKLIST = %w[
+    audiobook
+    book-club
+    books-i-own
+    currently-reading
+    ebook
+    favorites
+    favourites
+    kindle
+    owned
+    owned-books
+    re-read
+    series
+    si
+    to-buy
+    to-read
+    wish-list
+  ].freeze
 
   GOODREADS_MERGE = {
-    "Non-fiction" => "Nonfiction",
-    "Classic" => "Classics",
-    "Cookbook" => "Cooking",
-    "Cookbooks" => "Cooking",
-    "Biography" => "Memoir",
-    "Biographies" => "Memoir",
-    "Autobiography" => "Memoir",
-    "Auto-biography" => "Memoir",
-    "Sci-fi" => "Science Fiction",
-    "Scifi" => "Science Fiction",
-    "Management" => "Leadership",
-    "Self-help" => "Personal Development",
-    "Selfhelp" => "Personal Development",
-    "Personal-development" => "Personal Development",
-    "Self-improvement" => "Personal Development",
-    "Science-fiction" => "Science Fiction",
-    "Ya" => "Young-adult",
-    "Tech" => "Technology",
-    "Young-adult" => "Young Adult",
-    "Computer-science" => "Programming",
-    "Investing" => "Economics",
-    "Fitness" => "Health",
-    "Food" => "Cooking",
-    "Finance" => "Economics",
-    "Software" => "Programming",
-    "Literature" => "Classics",
-  }
+    'Auto-biography' => 'Memoir',
+    'Autobiography' => 'Memoir',
+    'Biographies' => 'Memoir',
+    'Biography' => 'Memoir',
+    'Classic' => 'Classics',
+    'Computer-science' => 'Programming',
+    'Cookbook' => 'Cooking',
+    'Cookbooks' => 'Cooking',
+    'Finance' => 'Economics',
+    'Fitness' => 'Health',
+    'Food' => 'Cooking',
+    'Investing' => 'Economics',
+    'Literature' => 'Classics',
+    'Management' => 'Leadership',
+    'Non-fiction' => 'Nonfiction',
+    'Personal-development' => 'Personal Development',
+    'Sci-fi' => 'Science Fiction',
+    'Science-fiction' => 'Science Fiction',
+    'Scifi' => 'Science Fiction',
+    'Self-help' => 'Personal Development',
+    'Self-improvement' => 'Personal Development',
+    'Selfhelp' => 'Personal Development',
+    'Software' => 'Programming',
+    'Tech' => 'Technology',
+    'Ya' => 'Young-adult',
+    'Young-adult' => 'Young Adult'
+  }.freeze
 
   CATEGORIES = [
-    "Business", "Psychology", "Science", "Personal Development", "Philosophy",
-    "History", "Fiction", "Memoir", "Leadership", "Classics", "Economics",
-    "Cooking", "Programming", "Health", "Politics", "Technology", "Science Fiction",
-    "Entrepreneurship", "Design", "Writing", "Fantasy", "Young Adult", "Nonfiction",
-  ]
+    'Business',
+    'Classics',
+    'Cooking',
+    'Design',
+    'Economics',
+    'Entrepreneurship',
+    'Fantasy',
+    'Fiction',
+    'Health',
+    'History',
+    'Leadership',
+    'Memoir',
+    'Nonfiction',
+    'Personal Development',
+    'Philosophy',
+    'Politics',
+    'Programming',
+    'Psychology',
+    'Science Fiction',
+    'Science',
+    'Technology',
+    'Writing',
+    'Young Adult'
+  ].freeze
 
   # Create a Book record from a Goodreads API request
-  def create_from_goodreads(book, mark_read, personal_rating)
-    self['ISBN']              = book.isbn13
-    self['Title']             = book.title_without_series
+  def update(book, mark_read, my_rating)
+    self['Goodreads ID']      = book&.id
+    self['ISBN']              = book&.isbn13
+    self['Title']             = book&.title_without_series
+    self['Description']       = sanitize(book.description)
     self['Cover']             = create_cover(book)
-    self['Categories']        = create_categories(goodreads_categories)
+    self['Genres']            = merged_genres
     series, series_number     = create_series(book.title)
     self['Series']            = series
     self['Series Number']     = series_number
-    self['Publication Year']  = book.publication_year.to_s if !book.publication_year.blank?
-    self['Goodreads Rating']  = book.average_rating.to_f
-    self['Personal Rating']   = personal_rating if personal_rating > 0
-    self['Goodreads URL']     = book.link
-    self['Pages']             = book.num_pages.to_i
+    self['Publication Year']  = book.publication_year&.to_s
+    self['Goodreads Rating']  = book.average_rating&.to_f
+    self['Personal Rating']   = my_rating if my_rating.positive?
+    self['Goodreads URL']     = book&.link
+    self['Pages']             = book.num_pages&.to_i
     authors                   = [book.authors.author].flatten
-    self['Authors']           = create_author(authors)
-    self['Goodreads Ratings'] = book.ratings_count.to_i
-    self['Read']              = true if mark_read
-    self.save
+    self['Authors']           = create_authors(authors)
+    self['Goodreads Ratings'] = book&.ratings_count&.to_i
+    self['Read']              = mark_read
+    save
+  end
+
+  def equals_to(book)
+    return true if self['Goodreads ID'] == book.id
+    return true if self['Title'] == book.title_without_series
+    false
+  end
+
+  def need_to_update?(mark_read, my_rating)
+    return true if my_rating.positive? && self['Personal Rating'] != my_rating
+    return true if !!self['Read'] != !!mark_read
+    false
+  end
+
+  def self.cached_genres
+    @cached_genres ||= Genre.all.to_set
+  end
+
+  def self.create_genre(args = {})
+    genre = Genre.create(args)
+    @cached_genres.add(genre)
+    genre
+  end
+
+  def self.cached_series
+    @cached_series ||= Serie.all.to_set
+  end
+
+  def self.create_serie(args = {})
+    serie = Serie.create(args)
+    @cached_series.add(serie)
+    serie
+  end
+
+  def self.cached_authors
+    @cached_authors ||= Author.all.to_set
+  end
+
+  def self.create_author(args = {})
+    author = Author.create(args)
+    @cached_authors.add(author)
+    author
   end
 
   private
 
-    def create_cover(book)
-      [
-        {
-          "url": book.image_url
-        }
-      ]
+  def merged_genres
+    new_genres = create_genres(goodreads_genres)
+    old_genres = Array(self['Genres'])
+    old_genres + (new_genres - old_genres)
+  end
+
+  def sanitize(html_text)
+    return '' unless html_text
+
+    html_text
+      .split(/\<.*?\>/)
+      .map(&:strip)
+      .reject(&:empty?)
+      .join(' ')
+      .gsub(/\s,/,',')
+  end
+
+  def create_cover(book)
+    [
+      {
+        'url': book.image_url
+      }
+    ]
+  end
+
+  def create_genres(genres)
+    genre_ids = []
+    existing_genres = Book.cached_genres
+    genres.each do |genre|
+      genre = existing_genres.find { |a| a['Name'] == genre }
+      genre ||= Book.create_genre('Name' => genre)
+      genre_ids << genre.id
     end
+    genre_ids
+  end
 
-    def create_categories(categories)
-      category_ids     = []
-      existing_categories = Category.all
-      categories.each do |category|
-        existing_category = existing_categories.find {|a| a['Name'] == category}
-        category_ids <<
-              if existing_category
-                existing_category.id
-              else
-                Category.create("Name" => category).id
-              end
-      end
-      category_ids
-    end
+  def goodreads_genres(n = 5)
+    popular = goodreads_book.popular_shelves
+    return [] if popular.blank?
 
-    def goodreads_categories(n = 5)
-      popular = goodreads_book.popular_shelves
-      return [] if popular.blank?
+    shelves = popular.shelf
+    return [] unless shelves.first.respond_to?(:name)
 
-      shelves = popular.shelf
-      return [] unless shelves.first.respond_to?(:name)
-
-      shelves.map(&:name).reject { |name|
-        GOODREADS_BLACKLIST.include?(name)
-      }.first(n).map { |name|
+    shelves
+      .map(&:name)
+      .reject { |name| GOODREADS_BLACKLIST.include?(name) }
+      .first(n).map do |name|
         name = name.capitalize
         name = GOODREADS_MERGE[name] if GOODREADS_MERGE[name]
         (CATEGORIES.include?(name) && name) || nil
-      }.compact.uniq
-    end
-
-    def goodreads_id
-      query = self["ISBN"] if self["ISBN"]
-      query ||= "\"#{self['Title']}\""
-
-      search = goodreads_client.search_books(query)
-      if search.results.respond_to?(:work)
-        matches = [search.results.work].flatten
-
-        best_match ||= matches.first
-        return unless best_match
-        best_match.best_book.id
       end
-    end
+      .compact.uniq
+  end
 
-    def goodreads_book
-      goodreads_client.book(goodreads_id)
-    end
+  def goodreads_book
+    @goodreads_book ||= GoodreadsClient::Client.book(self['Goodreads ID'])
+  end
 
-    def goodreads_client
-      GoodreadsClient::Client
-    end
+  # Create or find Series
+  def create_series(title)
+    return [], nil unless title[/\((.*?)\)/]
 
-    # Create or find Series
-    def create_series(title)
-      return [], nil if !title[/\((.*?)\)/]
-      series_title_with_number = title[/\((.*?)\)/][1..-2]
-      series_title  = series_title_with_number.split('#')[0].tr('^a-zA-Z ', '').strip
-      series_number = series_title_with_number.split('#')[1].tr('^0-9.-', '')
+    series_title_with_number = title[/\((.*?)\)/][1..-2]
+    series_title = series_title_with_number&.split('#')[0]&.tr('^a-zA-Z ', '')&.strip
+    series_number = series_title_with_number&.split('#')[1]&.tr('^0-9.-', '')
 
-      existing_serie = Serie.all.find {|a| a['Title'] == series_title}
-      if existing_serie
-        return [existing_serie.id], series_number
-      else
-        return [Serie.create('Title' => series_title).id], series_number
-      end
-    end
+    serie = Book.cached_series.find { |a| a['Title'] == series_title }
+    serie ||= Book.create_serie('Title' => series_title)
+    return [serie.id], series_number
+  end
 
-    # Create or find author
-    def create_author(authors)
-      author_ids       = []
-      existing_authors = Author.all
-      authors.each do |author|
-        existing_author = existing_authors.find {|a| a['Name'] == author.name}
-        author_ids <<
-              if existing_author
-                existing_author.id
-              else
-                Author.create("Name" => author.name).id
-              end
-      end
-      author_ids
+  # Create or find author
+  def create_authors(authors)
+    author_ids       = []
+    existing_authors = Book.cached_authors
+    authors.each do |author|
+      existing_author = existing_authors.find { |a| a['Name'] == author.name }
+      existing_author ||= Book.create_author('Name' => author.name)
+      author_ids << existing_author.id
     end
+    author_ids
+  end
 end

@@ -1,6 +1,9 @@
 ![image showing airtable](http://reiler.net/goodreads-airtable.png)
 
-# Goodreads-Airtable
+# Original
+git@github.com:Evilbits/Goodreads-Airtable.git
+
+# goodreads-airtable
 Fetch your "read" and "to-read" shelves from Goodreads and sync with an Airtable.
 Won't work by default unless Airtable is setup with correct associations and attributes.
 
@@ -15,13 +18,10 @@ Setup Airtable.
 
 Run in cronjob.
 
-# Cron setup
-First run `rvm cron setup` if using RVM.
+#
 
-Afterwards setup the crontab with your ENV vars like so.
-This will run the script every 30 minutes.
 ```
-GOODREADS_TOKEN=""
+GOODREADS_KEY=""
 GOODREADS_SECRET=""
 AIRTABLE_KEY=""
 0,30 * * * * ruby /path/to/script/importer.rb
